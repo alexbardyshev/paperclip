@@ -26,22 +26,12 @@ const sharedOpts = {
   singleLine: true,
 };
 
-export const logger = pino({
-  level: "debug",
-}, pino.transport({
-  targets: [
-    {
-      target: "pino-pretty",
-      options: { ...sharedOpts, ignore: "pid,hostname,req,res,responseTime", colorize: true, destination: 1 },
-      level: "info",
-    },
-    {
-      target: "pino-pretty",
-      options: { ...sharedOpts, colorize: false, destination: logFile, mkdir: true },
-      level: "debug",
-    },
-  ],
-}));
+const logStream = fs.createWriteStream(logFile, { flags: "a" });
+
+export const logger = pino({ level: "debug" }, pino.multistream([
+  { stream: process.stdout, level: "info" },
+  { stream: logStream, level: "debug" },
+]));
 
 export const httpLogger = pinoHttp({
   logger,

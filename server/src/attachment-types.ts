@@ -15,19 +15,7 @@
  *   - Wildcards:     "image/*"  or  "application/vnd.openxmlformats-officedocument.*"
  */
 
-export const DEFAULT_ALLOWED_TYPES: readonly string[] = [
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "image/gif",
-  "application/pdf",
-  "text/markdown",
-  "text/plain",
-  "application/json",
-  "text/csv",
-  "text/html",
-];
+export const DEFAULT_ALLOWED_TYPES: readonly string[] = ["*"];
 
 /**
  * Parse a comma-separated list of MIME type patterns into a normalised array.

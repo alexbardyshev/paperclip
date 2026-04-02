@@ -24,6 +24,10 @@ export function resolveServerDevWatchIgnorePaths(serverRoot: string): string[] {
   ]);
 
   for (const relativePath of [
+    "../node_modules",
+    "../packages/plugins/sdk/dist",
+    "../packages/shared/dist",
+    "../packages/adapter-utils/dist",
     "../ui/node_modules",
     "../ui/node_modules/.vite-temp",
     "../ui/.vite",

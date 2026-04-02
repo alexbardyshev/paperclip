@@ -3803,6 +3803,49 @@ export function heartbeatService(db: Db) {
 
     resumeQueuedRuns,
 
+    tickScheduledIssues: async (now = new Date()) => {
+      // Wake agents for issues whose scheduled_at has just arrived (within the last tick interval)
+      const windowStart = new Date(now.getTime() - 2 * 60 * 1000); // 2-minute window
+      const nowIso = now.toISOString();
+      const windowStartIso = windowStart.toISOString();
+      const scheduledRows = await db
+        .select({
+          issueId: issues.id,
+          agentId: issues.assigneeAgentId,
+          companyId: issues.companyId,
+        })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.status, "todo"),
+            sql`${issues.scheduledAt} IS NOT NULL`,
+            sql`${issues.scheduledAt} <= ${nowIso}::timestamptz`,
+            sql`${issues.scheduledAt} > ${windowStartIso}::timestamptz`,
+            sql`${issues.assigneeAgentId} IS NOT NULL`,
+          ),
+        );
+
+      let woken = 0;
+      for (const row of scheduledRows) {
+        if (!row.agentId) continue;
+        const run = await enqueueWakeup(row.agentId, {
+          source: "automation",
+          triggerDetail: "scheduled_issue",
+          reason: "scheduled_at_reached",
+          requestedByActorType: "system",
+          requestedByActorId: "heartbeat_scheduler",
+          contextSnapshot: {
+            issueId: row.issueId,
+            source: "scheduler",
+            reason: "scheduled_at_reached",
+            now: now.toISOString(),
+          },
+        });
+        if (run) woken += 1;
+      }
+      return { woken };
+    },
+
     tickTimers: async (now = new Date()) => {
       const allAgents = await db.select().from(agents);
       let checked = 0;

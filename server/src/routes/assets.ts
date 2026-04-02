@@ -1,7 +1,16 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
-import createDOMPurify from "dompurify";
-import { JSDOM } from "jsdom";
+let _jsdomModule: typeof import("jsdom") | null = null;
+let _dompurifyModule: typeof import("dompurify") | null = null;
+
+async function getJsdom() {
+  if (!_jsdomModule) _jsdomModule = await import("jsdom");
+  return _jsdomModule;
+}
+async function getDompurify() {
+  if (!_dompurifyModule) _dompurifyModule = await import("dompurify");
+  return _dompurifyModule;
+}
 import type { Db } from "@paperclipai/db";
 import { createAssetImageMetadataSchema } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
@@ -18,10 +27,12 @@ const ALLOWED_COMPANY_LOGO_CONTENT_TYPES = new Set([
   SVG_CONTENT_TYPE,
 ]);
 
-function sanitizeSvgBuffer(input: Buffer): Buffer | null {
+async function sanitizeSvgBuffer(input: Buffer): Promise<Buffer | null> {
   const raw = input.toString("utf8").trim();
   if (!raw) return null;
 
+  const { JSDOM } = await getJsdom();
+  const { default: createDOMPurify } = await getDompurify();
   const baseDom = new JSDOM("");
   const domPurify = createDOMPurify(
     baseDom.window as unknown as Parameters<typeof createDOMPurify>[0],
@@ -40,7 +51,7 @@ function sanitizeSvgBuffer(input: Buffer): Buffer | null {
     }
   });
 
-  let parsedDom: JSDOM | null = null;
+  let parsedDom: InstanceType<typeof JSDOM> | null = null;
   try {
     const sanitized = domPurify.sanitize(raw, {
       USE_PROFILES: { svg: true, svgFilters: true, html: false },
@@ -145,7 +156,7 @@ export function assetRoutes(db: Db, storage: StorageService) {
     }
     let fileBody = file.buffer;
     if (contentType === SVG_CONTENT_TYPE) {
-      const sanitized = sanitizeSvgBuffer(file.buffer);
+      const sanitized = await sanitizeSvgBuffer(file.buffer);
       if (!sanitized || sanitized.length <= 0) {
         res.status(422).json({ error: "SVG could not be sanitized" });
         return;
@@ -242,7 +253,7 @@ export function assetRoutes(db: Db, storage: StorageService) {
 
     let fileBody = file.buffer;
     if (contentType === SVG_CONTENT_TYPE) {
-      const sanitized = sanitizeSvgBuffer(file.buffer);
+      const sanitized = await sanitizeSvgBuffer(file.buffer);
       if (!sanitized || sanitized.length <= 0) {
         res.status(422).json({ error: "SVG could not be sanitized" });
         return;

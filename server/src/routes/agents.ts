@@ -976,9 +976,16 @@ export function agentRoutes(db: Db) {
     }
 
     const issuesSvc = issueService(db);
-    const rows = await issuesSvc.list(req.actor.companyId, {
+    const now = new Date();
+    const allRows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
       status: "todo,in_progress,blocked",
+    });
+    const rows = allRows.filter((issue) => {
+      if (issue.scheduledAt && issue.status === "todo") {
+        return new Date(issue.scheduledAt) <= now;
+      }
+      return true;
     });
 
     res.json(
@@ -992,6 +999,7 @@ export function agentRoutes(db: Db) {
         goalId: issue.goalId,
         parentId: issue.parentId,
         updatedAt: issue.updatedAt,
+        scheduledAt: issue.scheduledAt,
         activeRun: issue.activeRun,
       })),
     );

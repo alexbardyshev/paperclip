@@ -62,6 +62,12 @@ function parseModelsOutput(stdout: string): AdapterModel[] {
     if (!provider || !model) continue;
     parsed.push({ id: `${provider}/${model}`, label: `${provider}/${model}` });
   }
+
+  // Ensure minimax-m2.7 is available even if not listed by the CLI
+  if (!parsed.some((m) => m.id === "opencode/minimax-m2.7")) {
+    parsed.push({ id: "opencode/minimax-m2.7", label: "opencode/minimax-m2.7" });
+  }
+
   return dedupeModels(parsed);
 }
 

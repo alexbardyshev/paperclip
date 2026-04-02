@@ -18,15 +18,15 @@ function signatureForConfig(config: Config): string {
   });
 }
 
-export function createStorageServiceFromConfig(config: Config): StorageService {
-  return createStorageService(createStorageProviderFromConfig(config));
+export async function createStorageServiceFromConfig(config: Config): Promise<StorageService> {
+  return createStorageService(await createStorageProviderFromConfig(config));
 }
 
-export function getStorageService(): StorageService {
+export async function getStorageService(): Promise<StorageService> {
   const config = loadConfig();
   const signature = signatureForConfig(config);
   if (!cachedStorageService || cachedSignature !== signature) {
-    cachedStorageService = createStorageServiceFromConfig(config);
+    cachedStorageService = await createStorageServiceFromConfig(config);
     cachedSignature = signature;
   }
   return cachedStorageService;

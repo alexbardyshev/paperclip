@@ -515,7 +515,7 @@ export async function startServer(): Promise<StartedServer> {
     databasePort: resolvedEmbeddedPostgresPort,
   });
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
-  const storageService = createStorageServiceFromConfig(config);
+  const storageService = await createStorageServiceFromConfig(config);
   const app = await createApp(db as any, {
     uiMode,
     serverPort: listenPort,
@@ -584,6 +584,17 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "heartbeat timer tick failed");
+        });
+
+      void heartbeat
+        .tickScheduledIssues(new Date())
+        .then((result) => {
+          if (result.woken > 0) {
+            logger.info({ ...result }, "scheduled issues timer tick woke agents");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "scheduled issues timer tick failed");
         });
 
       void routines
