@@ -192,6 +192,7 @@ function CalendarTask({
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-issue-id", issue.id);
+        e.dataTransfer.setData("text/plain", issue.id);
         e.dataTransfer.effectAllowed = "move";
         onDragTask(issue.id);
       }}
@@ -282,6 +283,7 @@ function SidebarTask({ issue }: { issue: Issue }) {
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-issue-id", issue.id);
+        e.dataTransfer.setData("text/plain", issue.id); // fallback for all browsers
         e.dataTransfer.effectAllowed = "move";
         const el = e.currentTarget;
         e.dataTransfer.setDragImage(el, el.offsetWidth / 2, el.offsetHeight / 2);
@@ -385,7 +387,7 @@ function DayColumn({
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOverY(null);
-    const issueId = e.dataTransfer.getData("application/x-issue-id");
+    const issueId = e.dataTransfer.getData("application/x-issue-id") || e.dataTransfer.getData("text/plain");
     if (!issueId || !onDrop || !columnRef.current) return;
     const rect = columnRef.current.getBoundingClientRect();
     const y = e.clientY - rect.top;
@@ -533,7 +535,7 @@ function MonthGrid({
 
   function handleDropOnDay(e: React.DragEvent, day: number) {
     e.preventDefault();
-    const issueId = e.dataTransfer.getData("application/x-issue-id");
+    const issueId = e.dataTransfer.getData("application/x-issue-id") || e.dataTransfer.getData("text/plain");
     if (!issueId || !onDrop) return;
     const target = new Date(date.getFullYear(), date.getMonth(), day, 9, 0, 0, 0);
     onDrop(issueId, target);
@@ -617,6 +619,10 @@ export function Planner() {
     });
   }, []);
 
+  // Local schedule overrides — tasks stay on calendar immediately on drop,
+  // even before the server confirms. Cleared per-issue once server responds.
+  const [localSchedule, setLocalSchedule] = useState<Record<string, string>>({});
+
   useEffect(() => {
     setBreadcrumbs([{ label: "Планувальник" }]);
   }, [setBreadcrumbs]);
@@ -628,66 +634,50 @@ export function Planner() {
     enabled: !!selectedCompanyId,
   });
 
-  const issues = allIssues ?? [];
+  // Merge server data with local schedule overrides
+  const issues = useMemo(() => {
+    const base = allIssues ?? [];
+    if (Object.keys(localSchedule).length === 0) return base;
+    return base.map((issue) => {
+      const localAt = localSchedule[issue.id];
+      return localAt ? { ...issue, scheduledAt: localAt as unknown as Date } : issue;
+    });
+  }, [allIssues, localSchedule]);
 
   // ─── Mutation for updating scheduledAt ────────────────────────────────
-  // Uses the server response to update the cache directly (no refetch),
-  // to avoid the "task disappears" race condition.
+  // Local state is the source of truth for display. Server sync is best-effort.
 
   const updateMutation = useMutation({
-    mutationFn: async ({ id, scheduledAt }: { id: string; scheduledAt: string }) => {
-      const result = await issuesApi.update(id, { scheduledAt });
-      return result;
-    },
-    onMutate: async ({ id, scheduledAt }) => {
-      await queryClient.cancelQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
-
-      const previousIssues = queryClient.getQueryData<Issue[]>(
-        queryKeys.issues.list(selectedCompanyId!),
-      );
-
-      // Optimistic update
-      queryClient.setQueryData<Issue[]>(
-        queryKeys.issues.list(selectedCompanyId!),
-        (old) =>
-          old?.map((issue) =>
-            issue.id === id
-              ? { ...issue, scheduledAt: scheduledAt as unknown as Date }
-              : issue,
-          ) ?? [],
-      );
-
-      return { previousIssues };
-    },
-    onSuccess: (updatedIssue) => {
-      // Replace the optimistic data with the real server response
+    mutationFn: async ({ id, scheduledAt }: { id: string; scheduledAt: string }) =>
+      issuesApi.update(id, { scheduledAt }),
+    onSuccess: (updatedIssue, { id }) => {
+      // Server confirmed — move from local override to server cache
+      setLocalSchedule((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (updatedIssue) {
         queryClient.setQueryData<Issue[]>(
           queryKeys.issues.list(selectedCompanyId!),
-          (old) =>
-            old?.map((i) => (i.id === updatedIssue.id ? updatedIssue : i)) ?? [],
+          (old) => old?.map((i) => (i.id === updatedIssue.id ? updatedIssue : i)) ?? [],
         );
       }
     },
-    onError: (err: unknown, _vars, context) => {
-      // Rollback
-      if (context?.previousIssues) {
-        queryClient.setQueryData(
-          queryKeys.issues.list(selectedCompanyId!),
-          context.previousIssues,
-        );
-      }
-      // Show error to user
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[Planner] Failed to schedule task:", msg);
-      alert(`Помилка планування: ${msg}`);
+    onError: (err: unknown, { id }) => {
+      // Server failed — keep local override so task stays visible.
+      // Log for debugging only.
+      console.error("[Planner] scheduledAt sync failed for", id, err);
     },
-    // NO onSettled refetch — we update cache from onSuccess directly
   });
 
   const handleDrop = useCallback(
     (issueId: string, date: Date) => {
-      updateMutation.mutate({ id: issueId, scheduledAt: toSafeISO(date) });
+      const iso = toSafeISO(date);
+      // 1. Update local display immediately (never rolls back)
+      setLocalSchedule((prev) => ({ ...prev, [issueId]: iso }));
+      // 2. Fire server sync in background
+      updateMutation.mutate({ id: issueId, scheduledAt: iso });
     },
     [updateMutation],
   );
