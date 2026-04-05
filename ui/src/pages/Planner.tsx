@@ -15,13 +15,15 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
-  Clock,
   GripVertical,
   Inbox,
   CalendarCheck,
   AlertCircle,
   Sun,
   ListTodo,
+  X,
+  Clock,
+  Timer,
 } from "lucide-react";
 
 // ─── Date helpers ───────────────────────────────────────────────────────────
@@ -105,6 +107,7 @@ type ViewMode = "day" | "week" | "month";
 // ─── Duration helpers (localStorage-backed) ─────────────────────────────────
 
 const DURATION_KEY = "paperclip_planner_durations";
+const SCHEDULE_KEY = "paperclip_planner_schedule";
 const DEFAULT_DURATION = 30; // minutes
 const MIN_DURATION = 15;
 const SNAP_MINUTES = 15;
@@ -115,6 +118,18 @@ function loadDurations(): Record<string, number> {
   } catch {
     return {};
   }
+}
+
+function loadSchedule(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(SCHEDULE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveSchedule(s: Record<string, string>) {
+  try { localStorage.setItem(SCHEDULE_KEY, JSON.stringify(s)); } catch {}
 }
 
 function getDuration(durations: Record<string, number>, id: string): number {
@@ -140,22 +155,145 @@ const PRIORITY_COLORS: Record<string, string> = {
   low: "border-l-gray-400 bg-gray-400/8 dark:bg-gray-400/15",
 };
 
+// ─── Task detail popover ────────────────────────────────────────────────────
+
+function TaskDetailPopover({
+  issue,
+  durationMin,
+  onClose,
+  onSchedule,
+  onResize,
+}: {
+  issue: Issue;
+  durationMin: number;
+  onClose: () => void;
+  onSchedule: (issueId: string, date: Date) => void;
+  onResize: (issueId: string, duration: number) => void;
+}) {
+  const scheduled = issue.scheduledAt ? new Date(issue.scheduledAt) : new Date();
+  const [dateVal, setDateVal] = useState(() => {
+    const d = scheduled;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
+  const [timeVal, setTimeVal] = useState(() => formatTimeShort(scheduled));
+  const [dur, setDur] = useState(durationMin);
+
+  function handleSave() {
+    const [h, m] = timeVal.split(":").map(Number);
+    const [y, mo, day] = dateVal.split("-").map(Number);
+    const newDate = new Date(y, mo - 1, day, h ?? 9, m ?? 0, 0, 0);
+    onSchedule(issue.id, newDate);
+    if (dur !== durationMin) onResize(issue.id, dur);
+    onClose();
+  }
+
+  return (
+    <div
+      className="bg-popover border border-border rounded-lg shadow-xl p-3 w-64 text-sm"
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <span className="font-medium text-foreground text-xs truncate flex-1 mr-2">{issue.title}</span>
+        <button
+          onClick={onClose}
+          className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {/* Date */}
+        <div>
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground mb-1">
+            <CalendarDays className="h-3 w-3" /> Дата
+          </label>
+          <input
+            type="date"
+            value={dateVal}
+            onChange={(e) => setDateVal(e.target.value)}
+            className="w-full border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+
+        {/* Start time */}
+        <div>
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground mb-1">
+            <Clock className="h-3 w-3" /> Час початку
+          </label>
+          <input
+            type="time"
+            value={timeVal}
+            onChange={(e) => setTimeVal(e.target.value)}
+            className="w-full border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+
+        {/* Duration */}
+        <div>
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground mb-1">
+            <Timer className="h-3 w-3" /> Тривалість (хв)
+          </label>
+          <input
+            type="number"
+            min={15}
+            step={15}
+            value={dur}
+            onChange={(e) => setDur(Math.max(15, Number(e.target.value)))}
+            className="w-full border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+      </div>
+
+      <button
+        onClick={handleSave}
+        className="mt-3 w-full bg-primary text-primary-foreground text-xs py-1.5 rounded font-medium hover:bg-primary/90 transition-colors"
+      >
+        Зберегти
+      </button>
+    </div>
+  );
+}
+
+// ─── Calendar task card ─────────────────────────────────────────────────────
+
 function CalendarTask({
   issue,
   durationMin,
   onResize,
   onDragTask,
+  onSchedule,
 }: {
   issue: Issue;
   durationMin: number;
   onResize: (issueId: string, newDuration: number) => void;
   onDragTask: (issueId: string) => void;
+  onSchedule: (issueId: string, date: Date) => void;
 }) {
   const height = Math.max(MIN_TASK_HEIGHT, durationMin * PX_PER_MINUTE);
   const done = issue.status === "done" || issue.status === "cancelled";
   const resizing = useRef(false);
   const startY = useRef(0);
   const startDur = useRef(durationMin);
+  const [showPopover, setShowPopover] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const taskRef = useRef<HTMLDivElement>(null);
+
+  // Close popover on outside click
+  useEffect(() => {
+    if (!showPopover) return;
+    function onDown(e: MouseEvent) {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
+        taskRef.current && !taskRef.current.contains(e.target as Node)
+      ) {
+        setShowPopover(false);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [showPopover]);
 
   function handleResizeStart(e: React.MouseEvent) {
     e.preventDefault();
@@ -187,58 +325,81 @@ function CalendarTask({
   const showTime = height >= 20;
 
   return (
-    <div
-      style={{ height }}
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData("application/x-issue-id", issue.id);
-        e.dataTransfer.setData("text/plain", issue.id);
-        e.dataTransfer.effectAllowed = "move";
-        onDragTask(issue.id);
-      }}
-      className={cn(
-        "group relative rounded-md border-l-[3px] text-xs overflow-hidden select-none",
-        "cursor-grab active:cursor-grabbing hover:shadow-md transition-shadow",
-        PRIORITY_COLORS[issue.priority] ?? PRIORITY_COLORS.medium,
-        done && "opacity-50",
-      )}
-    >
-      {/* Content */}
-      <div className="px-1.5 py-0.5 min-w-0 h-full flex flex-col">
-        <div className="flex items-center gap-1 min-w-0">
-          <StatusIcon status={issue.status} className="h-3 w-3 shrink-0" />
-          <Link
-            to={`/issues/${issue.identifier ?? issue.id}`}
-            draggable={false}
-            onClick={(e) => e.stopPropagation()}
-            className={cn(
-              "truncate text-foreground font-medium no-underline hover:underline text-[11px] leading-tight",
-              done && "line-through",
-            )}
-          >
-            {issue.title}
-          </Link>
+    <div style={{ height }} className="relative">
+      {/* Main task card */}
+      <div
+        ref={taskRef}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("application/x-issue-id", issue.id);
+          e.dataTransfer.setData("text/plain", issue.id);
+          e.dataTransfer.effectAllowed = "move";
+          onDragTask(issue.id);
+        }}
+        onClick={() => setShowPopover((v) => !v)}
+        className={cn(
+          "group relative rounded-md border-l-[3px] text-xs overflow-hidden select-none h-full",
+          "cursor-pointer hover:shadow-md transition-shadow",
+          PRIORITY_COLORS[issue.priority] ?? PRIORITY_COLORS.medium,
+          done && "opacity-50",
+          showPopover && "ring-1 ring-ring",
+        )}
+      >
+        {/* Content */}
+        <div className="px-1.5 py-0.5 min-w-0 h-full flex flex-col">
+          <div className="flex items-center gap-1 min-w-0">
+            <StatusIcon status={issue.status} className="h-3 w-3 shrink-0" />
+            <Link
+              to={`/issues/${issue.identifier ?? issue.id}`}
+              draggable={false}
+              onClick={(e) => e.stopPropagation()}
+              className={cn(
+                "truncate text-foreground font-medium no-underline hover:underline text-[11px] leading-tight",
+                done && "line-through",
+              )}
+            >
+              {issue.title}
+            </Link>
+          </div>
+          {showTime && issue.scheduledAt && (
+            <span className="text-[10px] text-muted-foreground leading-none mt-0.5">
+              {formatTimeShort(new Date(issue.scheduledAt))}
+              {durationMin >= 30 && ` — ${durationMin} хв`}
+            </span>
+          )}
+          {showDetails && issue.identifier && (
+            <span className="text-[10px] text-muted-foreground font-mono mt-auto leading-none pb-0.5">
+              {issue.identifier}
+            </span>
+          )}
         </div>
-        {showTime && issue.scheduledAt && (
-          <span className="text-[10px] text-muted-foreground leading-none mt-0.5">
-            {formatTimeShort(new Date(issue.scheduledAt))}
-            {durationMin >= 30 && ` — ${durationMin} хв`}
-          </span>
-        )}
-        {showDetails && issue.identifier && (
-          <span className="text-[10px] text-muted-foreground font-mono mt-auto leading-none pb-0.5">
-            {issue.identifier}
-          </span>
-        )}
+
+        {/* Resize handle */}
+        <div
+          onMouseDown={handleResizeStart}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize group-hover:bg-foreground/10 transition-colors z-20 flex items-center justify-center"
+        >
+          <div className="w-8 h-0.5 rounded-full bg-foreground/20 group-hover:bg-foreground/40" />
+        </div>
       </div>
 
-      {/* Resize handle */}
-      <div
-        onMouseDown={handleResizeStart}
-        className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize group-hover:bg-foreground/10 transition-colors z-20 flex items-center justify-center"
-      >
-        <div className="w-8 h-0.5 rounded-full bg-foreground/20 group-hover:bg-foreground/40" />
-      </div>
+      {/* Detail popover */}
+      {showPopover && (
+        <div
+          ref={popoverRef}
+          className="absolute left-0 z-[200] mt-1"
+          style={{ top: "100%" }}
+        >
+          <TaskDetailPopover
+            issue={issue}
+            durationMin={durationMin}
+            onClose={() => setShowPopover(false)}
+            onSchedule={onSchedule}
+            onResize={onResize}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -318,6 +479,7 @@ function DayColumn({
   isToday = false,
   onDrop,
   onResize,
+  onSchedule,
 }: {
   date: Date;
   issues: Issue[];
@@ -326,6 +488,7 @@ function DayColumn({
   isToday?: boolean;
   onDrop?: (issueId: string, date: Date) => void;
   onResize: (issueId: string, duration: number) => void;
+  onSchedule: (issueId: string, date: Date) => void;
 }) {
   const [dragOverY, setDragOverY] = useState<number | null>(null);
   const columnRef = useRef<HTMLDivElement>(null);
@@ -471,6 +634,7 @@ function DayColumn({
               durationMin={duration}
               onResize={onResize}
               onDragTask={() => {}}
+              onSchedule={onSchedule}
             />
           </div>
         ))}
@@ -619,9 +783,9 @@ export function Planner() {
     });
   }, []);
 
-  // Local schedule overrides — tasks stay on calendar immediately on drop,
-  // even before the server confirms. Cleared per-issue once server responds.
-  const [localSchedule, setLocalSchedule] = useState<Record<string, string>>({});
+  // Local schedule overrides — persisted to localStorage so they survive navigation.
+  // Cleared per-issue once server confirms scheduledAt is saved.
+  const [localSchedule, setLocalSchedule] = useState<Record<string, string>>(loadSchedule);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Планувальник" }]);
@@ -652,10 +816,11 @@ export function Planner() {
       issuesApi.update(id, { scheduledAt }),
     onSuccess: (updatedIssue, { id }) => {
       if (updatedIssue?.scheduledAt) {
-        // Server confirmed scheduledAt saved — safe to replace local override with server data
+        // Server confirmed scheduledAt saved — remove local override, use server data
         setLocalSchedule((prev) => {
           const next = { ...prev };
           delete next[id];
+          saveSchedule(next);
           return next;
         });
         queryClient.setQueryData<Issue[]>(
@@ -665,21 +830,33 @@ export function Planner() {
       }
       // If server returned issue without scheduledAt — keep local override so task stays on calendar
     },
-    onError: (err: unknown, { id }) => {
-      // Server failed — local override stays so task remains visible on calendar
-      console.error("[Planner] scheduledAt sync failed for", id, err);
+    onError: (err: unknown, { id: _id }) => {
+      // Server failed — local override stays (and is in localStorage) so task remains visible
+      console.error("[Planner] scheduledAt sync failed for", _id, err);
     },
   });
 
   const handleDrop = useCallback(
     (issueId: string, date: Date) => {
       const iso = toSafeISO(date);
-      // 1. Update local display immediately (never rolls back)
-      setLocalSchedule((prev) => ({ ...prev, [issueId]: iso }));
-      // 2. Fire server sync in background
+      // 1. Persist locally immediately (survives navigation)
+      setLocalSchedule((prev) => {
+        const next = { ...prev, [issueId]: iso };
+        saveSchedule(next);
+        return next;
+      });
+      // 2. Sync to server in background
       updateMutation.mutate({ id: issueId, scheduledAt: iso });
     },
     [updateMutation],
+  );
+
+  // Also used by the task detail popover to reschedule
+  const handleSchedule = useCallback(
+    (issueId: string, date: Date) => {
+      handleDrop(issueId, date);
+    },
+    [handleDrop],
   );
 
   // ─── Categorize issues ─────────────────────────────────────────────────
@@ -978,6 +1155,7 @@ export function Planner() {
                   isToday={isSameDay(selectedDate, today)}
                   onDrop={handleDrop}
                   onResize={handleResize}
+                  onSchedule={handleSchedule}
                 />
               ) : (
                 <>
@@ -996,6 +1174,7 @@ export function Planner() {
                         isToday={isSameDay(d, today)}
                         onDrop={handleDrop}
                         onResize={handleResize}
+                        onSchedule={handleSchedule}
                       />
                     );
                   })}
