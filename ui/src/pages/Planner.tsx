@@ -116,10 +116,15 @@ function TaskPill({
   const done = issue.status === "done" || issue.status === "cancelled";
 
   return (
-    <Link
-      to={`/issues/${issue.identifier ?? issue.id}`}
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/x-issue-id", issue.id);
+        e.dataTransfer.effectAllowed = "move";
+        e.stopPropagation();
+      }}
       className={cn(
-        "group block rounded-md border-l-[3px] px-2 py-1 text-xs transition-all hover:shadow-sm no-underline",
+        "group block rounded-md border-l-[3px] px-2 py-1 text-xs transition-all hover:shadow-sm cursor-grab active:cursor-grabbing",
         priorityColors[issue.priority] ?? priorityColors.medium,
         done && "opacity-50 line-through",
         compact ? "py-0.5" : "py-1.5",
@@ -127,7 +132,14 @@ function TaskPill({
     >
       <div className="flex items-center gap-1.5 min-w-0">
         <StatusIcon status={issue.status} className="h-3 w-3 shrink-0" />
-        <span className="truncate text-foreground font-medium">{issue.title}</span>
+        <Link
+          to={`/issues/${issue.identifier ?? issue.id}`}
+          draggable={false}
+          className="truncate text-foreground font-medium no-underline hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {issue.title}
+        </Link>
         {issue.scheduledAt && !compact && (
           <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
             {formatTimeShort(new Date(issue.scheduledAt))}
@@ -139,7 +151,7 @@ function TaskPill({
           {issue.identifier}
         </span>
       )}
-    </Link>
+    </div>
   );
 }
 
@@ -155,25 +167,32 @@ function SidebarTask({
   const done = issue.status === "done" || issue.status === "cancelled";
 
   return (
-    <Link
-      to={`/issues/${issue.identifier ?? issue.id}`}
+    <div
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData("text/plain", issue.id);
+        e.dataTransfer.setData("application/x-issue-id", issue.id);
         e.dataTransfer.effectAllowed = "move";
+        // Set drag image
+        const el = e.currentTarget;
+        e.dataTransfer.setDragImage(el, el.offsetWidth / 2, el.offsetHeight / 2);
       }}
       className={cn(
-        "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent/50 no-underline",
+        "group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent/50 cursor-grab active:cursor-grabbing",
         done && "opacity-50",
       )}
     >
-      <GripVertical className="h-3 w-3 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 cursor-grab" />
+      <GripVertical className="h-3 w-3 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
       <StatusIcon status={issue.status} className="h-3.5 w-3.5 shrink-0" />
-      <span className={cn("truncate text-foreground", done && "line-through")}>
+      <Link
+        to={`/issues/${issue.identifier ?? issue.id}`}
+        draggable={false}
+        onClick={(e) => e.stopPropagation()}
+        className={cn("truncate text-foreground no-underline hover:underline", done && "line-through")}
+      >
         {issue.title}
-      </span>
+      </Link>
       <PriorityIcon priority={issue.priority} className="h-3 w-3 ml-auto shrink-0 text-muted-foreground" />
-    </Link>
+    </div>
   );
 }
 
@@ -196,6 +215,8 @@ function DayColumn({
   isToday?: boolean;
   onDrop?: (issueId: string, date: Date) => void;
 }) {
+  const [dragOverHour, setDragOverHour] = useState<number | null>(null);
+
   const hours = useMemo(() => {
     const arr: number[] = [];
     for (let h = DAY_START_HOUR; h <= DAY_END_HOUR; h++) arr.push(h);
@@ -230,14 +251,20 @@ function DayColumn({
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const nowOffset = ((nowMinutes - DAY_START_HOUR * 60) / 60) * HOUR_HEIGHT;
 
-  function handleDragOver(e: React.DragEvent) {
+  function handleDragOver(e: React.DragEvent, hour: number) {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
+    setDragOverHour(hour);
+  }
+
+  function handleDragLeave() {
+    setDragOverHour(null);
   }
 
   function handleDrop(e: React.DragEvent, hour: number) {
     e.preventDefault();
-    const issueId = e.dataTransfer.getData("text/plain");
+    setDragOverHour(null);
+    const issueId = e.dataTransfer.getData("application/x-issue-id");
     if (!issueId || !onDrop) return;
     const target = new Date(date);
     target.setHours(hour, 0, 0, 0);
@@ -245,7 +272,7 @@ function DayColumn({
   }
 
   return (
-    <div className="flex flex-col min-w-0 flex-1">
+    <div className="flex flex-col min-w-0 flex-1" onDragLeave={handleDragLeave}>
       {showHeader && (
         <div
           className={cn(
@@ -271,9 +298,12 @@ function DayColumn({
         {hours.map((h) => (
           <div
             key={h}
-            className="border-b border-border/50 relative"
+            className={cn(
+              "border-b border-border/50 relative transition-colors",
+              dragOverHour === h && "bg-blue-500/10 ring-1 ring-inset ring-blue-500/30",
+            )}
             style={{ height: HOUR_HEIGHT }}
-            onDragOver={handleDragOver}
+            onDragOver={(e) => handleDragOver(e, h)}
             onDrop={(e) => handleDrop(e, h)}
           >
             {issuesByHour[h]?.map((issue) => (
@@ -369,7 +399,7 @@ function MonthGrid({
 
   function handleDropOnDay(e: React.DragEvent, day: number) {
     e.preventDefault();
-    const issueId = e.dataTransfer.getData("text/plain");
+    const issueId = e.dataTransfer.getData("application/x-issue-id");
     if (!issueId || !onDrop) return;
     const target = new Date(date.getFullYear(), date.getMonth(), day, 9, 0, 0, 0);
     onDrop(issueId, target);
