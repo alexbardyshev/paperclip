@@ -55,7 +55,7 @@ function isSameDay(a: Date, b: Date): boolean {
 function startOfWeek(d: Date): Date {
   const r = new Date(d);
   const day = r.getDay();
-  const diff = day === 0 ? 6 : day - 1; // Monday = start
+  const diff = day === 0 ? 6 : day - 1;
   r.setDate(r.getDate() - diff);
   r.setHours(0, 0, 0, 0);
   return r;
@@ -93,28 +93,159 @@ function formatTimeShort(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/** Strip milliseconds so Zod z.string().datetime() always accepts it */
+function toSafeISO(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 type ViewMode = "day" | "week" | "month";
 
-// ─── Task pill on the calendar ──────────────────────────────────────────────
+// ─── Duration helpers (localStorage-backed) ─────────────────────────────────
 
-function TaskPill({
+const DURATION_KEY = "paperclip_planner_durations";
+const DEFAULT_DURATION = 30; // minutes
+const MIN_DURATION = 15;
+const SNAP_MINUTES = 15;
+
+function loadDurations(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(DURATION_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function getDuration(durations: Record<string, number>, id: string): number {
+  return durations[id] || DEFAULT_DURATION;
+}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+const HOUR_HEIGHT = 56; // px per hour slot
+const DAY_START_HOUR = 6;
+const DAY_END_HOUR = 23;
+const TOTAL_HOURS = DAY_END_HOUR - DAY_START_HOUR + 1;
+const TOTAL_HEIGHT = TOTAL_HOURS * HOUR_HEIGHT;
+const PX_PER_MINUTE = HOUR_HEIGHT / 60;
+const MIN_TASK_HEIGHT = MIN_DURATION * PX_PER_MINUTE; // 14px for 15 min
+
+// ─── Calendar Task (variable height + resize) ──────────────────────────────
+
+const PRIORITY_COLORS: Record<string, string> = {
+  critical: "border-l-red-500 bg-red-500/8 dark:bg-red-500/15",
+  high: "border-l-orange-500 bg-orange-500/8 dark:bg-orange-500/15",
+  medium: "border-l-blue-500 bg-blue-500/8 dark:bg-blue-500/15",
+  low: "border-l-gray-400 bg-gray-400/8 dark:bg-gray-400/15",
+};
+
+function CalendarTask({
   issue,
-  compact = false,
+  durationMin,
+  onResize,
+  onDragTask,
 }: {
   issue: Issue;
-  compact?: boolean;
+  durationMin: number;
+  onResize: (issueId: string, newDuration: number) => void;
+  onDragTask: (issueId: string) => void;
 }) {
-  const priorityColors: Record<string, string> = {
-    critical: "border-l-red-500 bg-red-500/8 dark:bg-red-500/15",
-    high: "border-l-orange-500 bg-orange-500/8 dark:bg-orange-500/15",
-    medium: "border-l-blue-500 bg-blue-500/8 dark:bg-blue-500/15",
-    low: "border-l-gray-400 bg-gray-400/8 dark:bg-gray-400/15",
-  };
-
+  const height = Math.max(MIN_TASK_HEIGHT, durationMin * PX_PER_MINUTE);
   const done = issue.status === "done" || issue.status === "cancelled";
+  const resizing = useRef(false);
+  const startY = useRef(0);
+  const startDur = useRef(durationMin);
 
+  function handleResizeStart(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    resizing.current = true;
+    startY.current = e.clientY;
+    startDur.current = durationMin;
+
+    function onMove(ev: MouseEvent) {
+      if (!resizing.current) return;
+      const dy = ev.clientY - startY.current;
+      const deltaMins = dy / PX_PER_MINUTE;
+      const raw = startDur.current + deltaMins;
+      const snapped = Math.max(MIN_DURATION, Math.round(raw / SNAP_MINUTES) * SNAP_MINUTES);
+      onResize(issue.id, snapped);
+    }
+
+    function onUp() {
+      resizing.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  const showDetails = height >= 28;
+  const showTime = height >= 20;
+
+  return (
+    <div
+      style={{ height }}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/x-issue-id", issue.id);
+        e.dataTransfer.effectAllowed = "move";
+        onDragTask(issue.id);
+      }}
+      className={cn(
+        "group relative rounded-md border-l-[3px] text-xs overflow-hidden select-none",
+        "cursor-grab active:cursor-grabbing hover:shadow-md transition-shadow",
+        PRIORITY_COLORS[issue.priority] ?? PRIORITY_COLORS.medium,
+        done && "opacity-50",
+      )}
+    >
+      {/* Content */}
+      <div className="px-1.5 py-0.5 min-w-0 h-full flex flex-col">
+        <div className="flex items-center gap-1 min-w-0">
+          <StatusIcon status={issue.status} className="h-3 w-3 shrink-0" />
+          <Link
+            to={`/issues/${issue.identifier ?? issue.id}`}
+            draggable={false}
+            onClick={(e) => e.stopPropagation()}
+            className={cn(
+              "truncate text-foreground font-medium no-underline hover:underline text-[11px] leading-tight",
+              done && "line-through",
+            )}
+          >
+            {issue.title}
+          </Link>
+        </div>
+        {showTime && issue.scheduledAt && (
+          <span className="text-[10px] text-muted-foreground leading-none mt-0.5">
+            {formatTimeShort(new Date(issue.scheduledAt))}
+            {durationMin >= 30 && ` — ${durationMin} хв`}
+          </span>
+        )}
+        {showDetails && issue.identifier && (
+          <span className="text-[10px] text-muted-foreground font-mono mt-auto leading-none pb-0.5">
+            {issue.identifier}
+          </span>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleResizeStart}
+        className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize group-hover:bg-foreground/10 transition-colors z-20 flex items-center justify-center"
+      >
+        <div className="w-8 h-0.5 rounded-full bg-foreground/20 group-hover:bg-foreground/40" />
+      </div>
+    </div>
+  );
+}
+
+// ─── Compact pill for month view ────────────────────────────────────────────
+
+function MonthPill({ issue }: { issue: Issue }) {
+  const done = issue.status === "done" || issue.status === "cancelled";
   return (
     <div
       draggable
@@ -124,46 +255,26 @@ function TaskPill({
         e.stopPropagation();
       }}
       className={cn(
-        "group block rounded-md border-l-[3px] px-2 py-1 text-xs transition-all hover:shadow-sm cursor-grab active:cursor-grabbing",
-        priorityColors[issue.priority] ?? priorityColors.medium,
+        "rounded border-l-2 px-1 py-0.5 text-[10px] truncate cursor-grab",
+        PRIORITY_COLORS[issue.priority] ?? PRIORITY_COLORS.medium,
         done && "opacity-50 line-through",
-        compact ? "py-0.5" : "py-1.5",
       )}
     >
-      <div className="flex items-center gap-1.5 min-w-0">
-        <StatusIcon status={issue.status} className="h-3 w-3 shrink-0" />
-        <Link
-          to={`/issues/${issue.identifier ?? issue.id}`}
-          draggable={false}
-          className="truncate text-foreground font-medium no-underline hover:underline"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {issue.title}
-        </Link>
-        {issue.scheduledAt && !compact && (
-          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-            {formatTimeShort(new Date(issue.scheduledAt))}
-          </span>
-        )}
-      </div>
-      {!compact && issue.identifier && (
-        <span className="text-[10px] text-muted-foreground font-mono mt-0.5 block">
-          {issue.identifier}
-        </span>
-      )}
+      <Link
+        to={`/issues/${issue.identifier ?? issue.id}`}
+        draggable={false}
+        onClick={(e) => e.stopPropagation()}
+        className="truncate text-foreground no-underline hover:underline font-medium"
+      >
+        {issue.title}
+      </Link>
     </div>
   );
 }
 
 // ─── Task sidebar item ──────────────────────────────────────────────────────
 
-function SidebarTask({
-  issue,
-  onSchedule,
-}: {
-  issue: Issue;
-  onSchedule?: (issueId: string, date: Date) => void;
-}) {
+function SidebarTask({ issue }: { issue: Issue }) {
   const done = issue.status === "done" || issue.status === "cancelled";
 
   return (
@@ -172,7 +283,6 @@ function SidebarTask({
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-issue-id", issue.id);
         e.dataTransfer.effectAllowed = "move";
-        // Set drag image
         const el = e.currentTarget;
         e.dataTransfer.setDragImage(el, el.offsetWidth / 2, el.offsetHeight / 2);
       }}
@@ -198,24 +308,25 @@ function SidebarTask({
 
 // ─── Day column (used in day & week view) ───────────────────────────────────
 
-const HOUR_HEIGHT = 56; // px per hour slot
-const DAY_START_HOUR = 6;
-const DAY_END_HOUR = 23;
-
 function DayColumn({
   date,
   issues,
+  durations,
   showHeader = false,
   isToday = false,
   onDrop,
+  onResize,
 }: {
   date: Date;
   issues: Issue[];
+  durations: Record<string, number>;
   showHeader?: boolean;
   isToday?: boolean;
   onDrop?: (issueId: string, date: Date) => void;
+  onResize: (issueId: string, duration: number) => void;
 }) {
-  const [dragOverHour, setDragOverHour] = useState<number | null>(null);
+  const [dragOverY, setDragOverY] = useState<number | null>(null);
+  const columnRef = useRef<HTMLDivElement>(null);
 
   const hours = useMemo(() => {
     const arr: number[] = [];
@@ -223,56 +334,76 @@ function DayColumn({
     return arr;
   }, []);
 
-  // Group issues by hour
-  const issuesByHour = useMemo(() => {
-    const map: Record<number, Issue[]> = {};
-    const unscheduledTime: Issue[] = [];
-    for (const issue of issues) {
-      if (!issue.scheduledAt) {
-        unscheduledTime.push(issue);
-        continue;
-      }
-      const d = new Date(issue.scheduledAt);
-      const h = d.getHours();
-      if (!map[h]) map[h] = [];
-      map[h].push(issue);
-    }
-    // Put tasks with no time at 9am
-    if (unscheduledTime.length > 0) {
-      if (!map[9]) map[9] = [];
-      map[9].push(...unscheduledTime);
-    }
-    return map;
-  }, [issues]);
+  // Position tasks absolutely by their scheduledAt time
+  const positionedTasks = useMemo(() => {
+    return issues
+      .filter((i) => i.scheduledAt)
+      .map((issue) => {
+        const d = new Date(issue.scheduledAt!);
+        const minutesSinceStart = (d.getHours() - DAY_START_HOUR) * 60 + d.getMinutes();
+        const top = minutesSinceStart * PX_PER_MINUTE;
+        const dur = getDuration(durations, issue.id);
+        const height = Math.max(MIN_TASK_HEIGHT, dur * PX_PER_MINUTE);
+        return { issue, top, height, duration: dur };
+      })
+      .sort((a, b) => a.top - b.top);
+  }, [issues, durations]);
 
   // Current time indicator
   const now = new Date();
   const showNowLine = isToday;
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const nowOffset = ((nowMinutes - DAY_START_HOUR * 60) / 60) * HOUR_HEIGHT;
+  const nowMinutes = (now.getHours() - DAY_START_HOUR) * 60 + now.getMinutes();
+  const nowOffset = nowMinutes * PX_PER_MINUTE;
 
-  function handleDragOver(e: React.DragEvent, hour: number) {
+  // Calculate snapped time from Y position
+  function yToTime(y: number): Date {
+    const totalMinutes = y / PX_PER_MINUTE + DAY_START_HOUR * 60;
+    const snapped = Math.round(totalMinutes / SNAP_MINUTES) * SNAP_MINUTES;
+    const hours = Math.floor(snapped / 60);
+    const minutes = snapped % 60;
+    const target = new Date(date);
+    target.setHours(
+      Math.max(DAY_START_HOUR, Math.min(DAY_END_HOUR, hours)),
+      minutes, 0, 0,
+    );
+    return target;
+  }
+
+  function handleDragOver(e: React.DragEvent) {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    setDragOverHour(hour);
+    if (columnRef.current) {
+      const rect = columnRef.current.getBoundingClientRect();
+      setDragOverY(e.clientY - rect.top);
+    }
   }
 
   function handleDragLeave() {
-    setDragOverHour(null);
+    setDragOverY(null);
   }
 
-  function handleDrop(e: React.DragEvent, hour: number) {
+  function handleDrop(e: React.DragEvent) {
     e.preventDefault();
-    setDragOverHour(null);
+    setDragOverY(null);
     const issueId = e.dataTransfer.getData("application/x-issue-id");
-    if (!issueId || !onDrop) return;
-    const target = new Date(date);
-    target.setHours(hour, 0, 0, 0);
+    if (!issueId || !onDrop || !columnRef.current) return;
+    const rect = columnRef.current.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const target = yToTime(y);
     onDrop(issueId, target);
   }
 
+  // Snap indicator position
+  const snapIndicatorTop = dragOverY !== null
+    ? (() => {
+        const totalMinutes = dragOverY / PX_PER_MINUTE + DAY_START_HOUR * 60;
+        const snapped = Math.round(totalMinutes / SNAP_MINUTES) * SNAP_MINUTES;
+        return ((snapped - DAY_START_HOUR * 60) * PX_PER_MINUTE);
+      })()
+    : null;
+
   return (
-    <div className="flex flex-col min-w-0 flex-1" onDragLeave={handleDragLeave}>
+    <div className="flex flex-col min-w-0 flex-1">
       {showHeader && (
         <div
           className={cn(
@@ -294,27 +425,56 @@ function DayColumn({
           </div>
         </div>
       )}
-      <div className="relative">
+
+      {/* The time grid + tasks */}
+      <div
+        ref={columnRef}
+        className="relative"
+        style={{ height: TOTAL_HEIGHT }}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {/* Hour lines */}
         {hours.map((h) => (
           <div
             key={h}
-            className={cn(
-              "border-b border-border/50 relative transition-colors",
-              dragOverHour === h && "bg-blue-500/10 ring-1 ring-inset ring-blue-500/30",
-            )}
-            style={{ height: HOUR_HEIGHT }}
-            onDragOver={(e) => handleDragOver(e, h)}
-            onDrop={(e) => handleDrop(e, h)}
+            className="absolute left-0 right-0 border-b border-border/50"
+            style={{ top: (h - DAY_START_HOUR) * HOUR_HEIGHT, height: HOUR_HEIGHT }}
+          />
+        ))}
+
+        {/* Drop indicator */}
+        {snapIndicatorTop !== null && snapIndicatorTop >= 0 && snapIndicatorTop <= TOTAL_HEIGHT && (
+          <div
+            className="absolute left-0 right-0 z-30 pointer-events-none"
+            style={{ top: snapIndicatorTop }}
           >
-            {issuesByHour[h]?.map((issue) => (
-              <div key={issue.id} className="absolute inset-x-1 z-10" style={{ top: 2 }}>
-                <TaskPill issue={issue} compact />
-              </div>
-            ))}
+            <div className="flex items-center">
+              <div className="w-2 h-2 rounded-full bg-blue-500 -ml-1" />
+              <div className="flex-1 h-[2px] bg-blue-500/60 border-dashed" />
+            </div>
+          </div>
+        )}
+
+        {/* Tasks */}
+        {positionedTasks.map(({ issue, top, height, duration }) => (
+          <div
+            key={issue.id}
+            className="absolute left-1 right-1 z-10"
+            style={{ top, height }}
+          >
+            <CalendarTask
+              issue={issue}
+              durationMin={duration}
+              onResize={onResize}
+              onDragTask={() => {}}
+            />
           </div>
         ))}
+
         {/* Current time indicator */}
-        {showNowLine && nowOffset > 0 && nowOffset < (DAY_END_HOUR - DAY_START_HOUR + 1) * HOUR_HEIGHT && (
+        {showNowLine && nowOffset > 0 && nowOffset < TOTAL_HEIGHT && (
           <div
             className="absolute left-0 right-0 z-20 pointer-events-none"
             style={{ top: nowOffset }}
@@ -326,31 +486,6 @@ function DayColumn({
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-// ─── Time gutter ────────────────────────────────────────────────────────────
-
-function TimeGutter() {
-  const hours = useMemo(() => {
-    const arr: number[] = [];
-    for (let h = DAY_START_HOUR; h <= DAY_END_HOUR; h++) arr.push(h);
-    return arr;
-  }, []);
-
-  return (
-    <div className="w-12 shrink-0 border-r border-border">
-      <div className="h-[calc(theme(spacing.2)*2+theme(fontSize.lg)+theme(fontSize.xs)+theme(lineHeight.tight)*2)] border-b border-border" />
-      {hours.map((h) => (
-        <div
-          key={h}
-          className="text-[10px] text-muted-foreground text-right pr-2 -mt-[7px] relative"
-          style={{ height: HOUR_HEIGHT }}
-        >
-          {formatHour(h)}
-        </div>
-      ))}
     </div>
   );
 }
@@ -373,7 +508,6 @@ function MonthGrid({
   const daysCount = getDaysInMonth(date);
   const firstDayOfWeek = monthStart.getDay() === 0 ? 6 : monthStart.getDay() - 1;
 
-  // Group issues by day-of-month
   const issuesByDay = useMemo(() => {
     const map: Record<number, Issue[]> = {};
     for (const issue of issues) {
@@ -407,7 +541,6 @@ function MonthGrid({
 
   return (
     <div className="flex-1 min-h-0 overflow-auto">
-      {/* Header */}
       <div className="grid grid-cols-7 border-b border-border">
         {DAY_NAMES_SHORT.map((name) => (
           <div key={name} className="text-center py-2 text-xs font-medium text-muted-foreground">
@@ -415,7 +548,6 @@ function MonthGrid({
           </div>
         ))}
       </div>
-      {/* Grid */}
       <div className="grid grid-cols-7 auto-rows-fr" style={{ minHeight: "calc(100% - 36px)" }}>
         {cells.map((day, i) => {
           if (day === null) {
@@ -439,16 +571,14 @@ function MonthGrid({
               <div
                 className={cn(
                   "text-xs font-medium mb-1",
-                  isToday
-                    ? "text-blue-600 dark:text-blue-400 font-bold"
-                    : "text-muted-foreground",
+                  isToday ? "text-blue-600 dark:text-blue-400 font-bold" : "text-muted-foreground",
                 )}
               >
                 {day === 1 ? `${day} ${SHORT_MONTH[date.getMonth()]}` : day}
               </div>
               <div className="space-y-0.5">
                 {dayIssues.slice(0, 3).map((issue) => (
-                  <TaskPill key={issue.id} issue={issue} compact />
+                  <MonthPill key={issue.id} issue={issue} />
                 ))}
                 {dayIssues.length > 3 && (
                   <div className="text-[10px] text-muted-foreground pl-1">
@@ -476,6 +606,17 @@ export function Planner() {
   const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
   const today = useMemo(() => startOfDay(new Date()), []);
 
+  // Duration state (localStorage-backed)
+  const [durations, setDurations] = useState<Record<string, number>>(loadDurations);
+
+  const handleResize = useCallback((issueId: string, newDuration: number) => {
+    setDurations((prev) => {
+      const next = { ...prev, [issueId]: newDuration };
+      try { localStorage.setItem(DURATION_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     setBreadcrumbs([{ label: "Планувальник" }]);
   }, [setBreadcrumbs]);
@@ -489,48 +630,64 @@ export function Planner() {
 
   const issues = allIssues ?? [];
 
-  // Mutation for updating scheduledAt with optimistic updates
+  // ─── Mutation for updating scheduledAt ────────────────────────────────
+  // Uses the server response to update the cache directly (no refetch),
+  // to avoid the "task disappears" race condition.
+
   const updateMutation = useMutation({
-    mutationFn: ({ id, scheduledAt }: { id: string; scheduledAt: string }) =>
-      issuesApi.update(id, { scheduledAt }),
+    mutationFn: async ({ id, scheduledAt }: { id: string; scheduledAt: string }) => {
+      const result = await issuesApi.update(id, { scheduledAt });
+      return result;
+    },
     onMutate: async ({ id, scheduledAt }) => {
-      // Cancel any outgoing refetches so they don't overwrite our optimistic update
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
 
-      // Snapshot previous value for rollback
       const previousIssues = queryClient.getQueryData<Issue[]>(
         queryKeys.issues.list(selectedCompanyId!),
       );
 
-      // Optimistically update the cached issue list
+      // Optimistic update
       queryClient.setQueryData<Issue[]>(
         queryKeys.issues.list(selectedCompanyId!),
         (old) =>
           old?.map((issue) =>
-            issue.id === id ? { ...issue, scheduledAt: scheduledAt as unknown as Date } : issue,
+            issue.id === id
+              ? { ...issue, scheduledAt: scheduledAt as unknown as Date }
+              : issue,
           ) ?? [],
       );
 
       return { previousIssues };
     },
-    onError: (_err, _vars, context) => {
-      // Roll back to the previous value on error
+    onSuccess: (updatedIssue) => {
+      // Replace the optimistic data with the real server response
+      if (updatedIssue) {
+        queryClient.setQueryData<Issue[]>(
+          queryKeys.issues.list(selectedCompanyId!),
+          (old) =>
+            old?.map((i) => (i.id === updatedIssue.id ? updatedIssue : i)) ?? [],
+        );
+      }
+    },
+    onError: (err: unknown, _vars, context) => {
+      // Rollback
       if (context?.previousIssues) {
         queryClient.setQueryData(
           queryKeys.issues.list(selectedCompanyId!),
           context.previousIssues,
         );
       }
+      // Show error to user
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[Planner] Failed to schedule task:", msg);
+      alert(`Помилка планування: ${msg}`);
     },
-    onSettled: () => {
-      // Always refetch after mutation to sync with server
-      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
-    },
+    // NO onSettled refetch — we update cache from onSuccess directly
   });
 
   const handleDrop = useCallback(
     (issueId: string, date: Date) => {
-      updateMutation.mutate({ id: issueId, scheduledAt: date.toISOString() });
+      updateMutation.mutate({ id: issueId, scheduledAt: toSafeISO(date) });
     },
     [updateMutation],
   );
@@ -593,7 +750,6 @@ export function Planner() {
         return d >= ws && d < we;
       });
     }
-    // month
     const ms = startOfMonth(selectedDate);
     const me = endOfMonth(selectedDate);
     return scheduled.filter((i) => {
@@ -620,11 +776,11 @@ export function Planner() {
     setSelectedDate(startOfDay(new Date()));
   }
 
-  // Scroll to current time on mount (day/week view)
+  // Scroll to current time on mount
   useEffect(() => {
     if (viewMode !== "month" && scrollRef.current) {
       const now = new Date();
-      const offset = ((now.getHours() - DAY_START_HOUR - 1) * HOUR_HEIGHT);
+      const offset = (now.getHours() - DAY_START_HOUR - 1) * HOUR_HEIGHT;
       if (offset > 0) {
         scrollRef.current.scrollTop = offset;
       }
@@ -743,7 +899,6 @@ export function Planner() {
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Toolbar */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0 bg-background">
-          {/* View mode toggle */}
           <div className="flex items-center rounded-md border border-border overflow-hidden text-xs">
             {(["day", "week", "month"] as const).map((mode) => (
               <button
@@ -761,7 +916,6 @@ export function Planner() {
             ))}
           </div>
 
-          {/* Navigation */}
           <div className="flex items-center gap-1">
             <button
               onClick={navigatePrev}
@@ -783,10 +937,8 @@ export function Planner() {
             </button>
           </div>
 
-          {/* Header label */}
           <h2 className="text-sm font-semibold text-foreground">{headerLabel}</h2>
 
-          {/* Stats */}
           <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
             {overdueIssues.length > 0 && (
               <span className="text-red-600 dark:text-red-400 font-medium">
@@ -817,7 +969,7 @@ export function Planner() {
                 {viewMode === "week" && (
                   <div className="h-[52px] border-b border-border" />
                 )}
-                {Array.from({ length: DAY_END_HOUR - DAY_START_HOUR + 1 }, (_, i) => (
+                {Array.from({ length: TOTAL_HOURS }, (_, i) => (
                   <div
                     key={i}
                     className="text-[10px] text-muted-foreground text-right pr-2 relative"
@@ -832,11 +984,12 @@ export function Planner() {
                 <DayColumn
                   date={selectedDate}
                   issues={viewIssues}
+                  durations={durations}
                   isToday={isSameDay(selectedDate, today)}
                   onDrop={handleDrop}
+                  onResize={handleResize}
                 />
               ) : (
-                /* Week view: 7 day columns */
                 <>
                   {Array.from({ length: 7 }, (_, i) => {
                     const d = addDays(startOfWeek(selectedDate), i);
@@ -848,9 +1001,11 @@ export function Planner() {
                         key={i}
                         date={d}
                         issues={dayIssues}
+                        durations={durations}
                         showHeader
                         isToday={isSameDay(d, today)}
                         onDrop={handleDrop}
+                        onResize={handleResize}
                       />
                     );
                   })}
