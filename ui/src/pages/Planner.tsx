@@ -651,22 +651,22 @@ export function Planner() {
     mutationFn: async ({ id, scheduledAt }: { id: string; scheduledAt: string }) =>
       issuesApi.update(id, { scheduledAt }),
     onSuccess: (updatedIssue, { id }) => {
-      // Server confirmed — move from local override to server cache
-      setLocalSchedule((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-      if (updatedIssue) {
+      if (updatedIssue?.scheduledAt) {
+        // Server confirmed scheduledAt saved — safe to replace local override with server data
+        setLocalSchedule((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
         queryClient.setQueryData<Issue[]>(
           queryKeys.issues.list(selectedCompanyId!),
           (old) => old?.map((i) => (i.id === updatedIssue.id ? updatedIssue : i)) ?? [],
         );
       }
+      // If server returned issue without scheduledAt — keep local override so task stays on calendar
     },
     onError: (err: unknown, { id }) => {
-      // Server failed — keep local override so task stays visible.
-      // Log for debugging only.
+      // Server failed — local override stays so task remains visible on calendar
       console.error("[Planner] scheduledAt sync failed for", id, err);
     },
   });
