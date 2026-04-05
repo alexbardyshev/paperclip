@@ -489,11 +489,41 @@ export function Planner() {
 
   const issues = allIssues ?? [];
 
-  // Mutation for updating scheduledAt
+  // Mutation for updating scheduledAt with optimistic updates
   const updateMutation = useMutation({
     mutationFn: ({ id, scheduledAt }: { id: string; scheduledAt: string }) =>
       issuesApi.update(id, { scheduledAt }),
-    onSuccess: () => {
+    onMutate: async ({ id, scheduledAt }) => {
+      // Cancel any outgoing refetches so they don't overwrite our optimistic update
+      await queryClient.cancelQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
+
+      // Snapshot previous value for rollback
+      const previousIssues = queryClient.getQueryData<Issue[]>(
+        queryKeys.issues.list(selectedCompanyId!),
+      );
+
+      // Optimistically update the cached issue list
+      queryClient.setQueryData<Issue[]>(
+        queryKeys.issues.list(selectedCompanyId!),
+        (old) =>
+          old?.map((issue) =>
+            issue.id === id ? { ...issue, scheduledAt: scheduledAt as unknown as Date } : issue,
+          ) ?? [],
+      );
+
+      return { previousIssues };
+    },
+    onError: (_err, _vars, context) => {
+      // Roll back to the previous value on error
+      if (context?.previousIssues) {
+        queryClient.setQueryData(
+          queryKeys.issues.list(selectedCompanyId!),
+          context.previousIssues,
+        );
+      }
+    },
+    onSettled: () => {
+      // Always refetch after mutation to sync with server
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(selectedCompanyId!) });
     },
   });
