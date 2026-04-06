@@ -42,6 +42,12 @@ import {
   AlertTriangle,
   Tag,
   Calendar,
+  Clock,
+  Timer,
+  Sun,
+  Sunrise,
+  CalendarDays,
+  CalendarRange,
   Paperclip,
   FileText,
   Loader2,
@@ -210,13 +216,51 @@ function createUniqueDocumentKey(baseKey: string, stagedFiles: StagedIssueFile[]
   return `${baseKey}-${suffix}`;
 }
 
-function formatScheduledLabel(iso: string): string {
+function formatScheduledLabel(iso: string, durationMin?: number): string {
   const d = new Date(iso);
   const months = ["січ","лют","бер","кві","тра","чер","лип","сер","вер","жов","лис","гру"];
   const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0;
   const base = `${d.getDate()} ${months[d.getMonth()]}`;
-  if (!hasTime) return base;
-  return `${base} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+  const timePart = hasTime ? ` ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}` : "";
+  const durPart = durationMin && durationMin > 0 ? ` · ${durationMin >= 60 ? `${Math.floor(durationMin/60)}г${durationMin%60 ? ` ${durationMin%60}хв` : ""}` : `${durationMin}хв`}` : "";
+  return base + timePart + durPart;
+}
+
+// Quick schedule presets
+function getSchedulePresets(): { label: string; icon: React.ElementType; date: Date }[] {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+
+  // Next Saturday
+  const dayOfWeek = today.getDay(); // 0=Sun
+  const daysToSat = dayOfWeek === 6 ? 7 : (6 - dayOfWeek);
+  const weekend = new Date(today); weekend.setDate(today.getDate() + daysToSat);
+
+  // Next Monday
+  const daysToMon = dayOfWeek === 0 ? 1 : dayOfWeek === 1 ? 7 : (8 - dayOfWeek);
+  const nextWeek = new Date(today); nextWeek.setDate(today.getDate() + daysToMon);
+
+  const in2Weeks = new Date(today); in2Weeks.setDate(today.getDate() + 14);
+
+  const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+
+  return [
+    { label: "Сьогодні", icon: Sun, date: today },
+    { label: "Завтра", icon: Sunrise, date: tomorrow },
+    { label: "Ці вихідні", icon: CalendarDays, date: weekend },
+    { label: "Наступний тиждень", icon: CalendarRange, date: nextWeek },
+    { label: "Через 2 тижні", icon: CalendarRange, date: in2Weeks },
+    { label: "Наступний місяць", icon: Calendar, date: nextMonth },
+  ];
+}
+
+const DURATION_PRESETS = [15, 30, 45, 60, 90, 120] as const;
+function formatDurationLabel(min: number): string {
+  if (min < 60) return `${min}хв`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h}г ${m}хв` : `${h}г`;
 }
 
 function formatFileSize(file: File) {
@@ -310,6 +354,7 @@ export function NewIssueDialog() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [scheduledAt, setScheduledAt] = useState<string | null>(null);
   const [scheduledOpen, setScheduledOpen] = useState(false);
+  const [plannedDuration, setPlannedDuration] = useState<number>(30);
   const [companyOpen, setCompanyOpen] = useState(false);
   const descriptionEditorRef = useRef<MarkdownEditorRef>(null);
   const stageFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -434,6 +479,15 @@ export function NewIssueDialog() {
       return { issue, companyId, failures };
     },
     onSuccess: ({ issue, companyId, failures }) => {
+      // Save planned duration to localStorage for Planner calendar
+      if (plannedDuration && plannedDuration !== 30) {
+        try {
+          const key = "paperclip_planner_durations";
+          const durations = JSON.parse(localStorage.getItem(key) || "{}");
+          durations[issue.id] = plannedDuration;
+          localStorage.setItem(key, JSON.stringify(durations));
+        } catch {}
+      }
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(companyId) });
@@ -619,6 +673,9 @@ export function NewIssueDialog() {
     setStagedFiles([]);
     setIsFileDragOver(false);
     setCompanyOpen(false);
+    setScheduledAt(null);
+    setScheduledOpen(false);
+    setPlannedDuration(30);
     executionWorkspaceDefaultProjectId.current = null;
   }
 
@@ -1428,15 +1485,50 @@ export function NewIssueDialog() {
             <PopoverTrigger asChild>
               <button className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors ${scheduledAt ? "border-primary/50 bg-primary/10 text-primary" : "border-border hover:bg-accent/50 text-muted-foreground"}`}>
                 <Calendar className="h-3 w-3" />
-                {scheduledAt ? formatScheduledLabel(scheduledAt) : "Запланувати"}
+                {scheduledAt ? formatScheduledLabel(scheduledAt, plannedDuration) : "Запланувати"}
               </button>
             </PopoverTrigger>
-            <PopoverContent className="w-auto p-3" align="start">
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-muted-foreground">Запланувати виконання</p>
+            <PopoverContent className="w-72 p-0" align="start">
+              {/* Quick presets */}
+              <div className="p-2 border-b border-border">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide px-1 mb-1.5">Швидкий вибір</p>
+                <div className="space-y-0.5">
+                  {getSchedulePresets().map((preset) => {
+                    const Icon = preset.icon;
+                    const isSelected = scheduledAt && new Date(scheduledAt).toDateString() === preset.date.toDateString();
+                    return (
+                      <button
+                        key={preset.label}
+                        className={cn(
+                          "w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors text-left",
+                          isSelected ? "bg-primary/10 text-primary" : "text-foreground hover:bg-accent/50",
+                        )}
+                        onClick={() => {
+                          const d = new Date(preset.date);
+                          if (scheduledAt) {
+                            const prev = new Date(scheduledAt);
+                            d.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+                          }
+                          setScheduledAt(d.toISOString());
+                        }}
+                      >
+                        <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span>{preset.label}</span>
+                        <span className="ml-auto text-[10px] text-muted-foreground">
+                          {preset.date.getDate()}/{preset.date.getMonth() + 1}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Custom date & time */}
+              <div className="p-2 border-b border-border space-y-2">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide px-1">Точна дата</p>
                 <input
                   type="date"
-                  className="w-full rounded-md border border-border bg-background px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-ring"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
                   value={scheduledAt ? scheduledAt.slice(0, 10) : ""}
                   min={new Date().toISOString().slice(0, 10)}
                   onChange={(e) => {
@@ -1448,10 +1540,11 @@ export function NewIssueDialog() {
                   }}
                 />
                 <div className="flex items-center gap-2">
+                  <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                   <label className="text-xs text-muted-foreground shrink-0">Час</label>
                   <input
                     type="time"
-                    className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-ring"
+                    className="flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
                     value={scheduledAt ? `${String(new Date(scheduledAt).getHours()).padStart(2,"0")}:${String(new Date(scheduledAt).getMinutes()).padStart(2,"0")}` : ""}
                     onChange={(e) => {
                       const base = scheduledAt ? new Date(scheduledAt) : new Date();
@@ -1461,15 +1554,45 @@ export function NewIssueDialog() {
                     }}
                   />
                 </div>
-                {scheduledAt && (
-                  <button
-                    className="w-full flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-destructive hover:bg-destructive/10"
-                    onClick={() => setScheduledAt(null)}
-                  >
-                    Скасувати
-                  </button>
-                )}
+                <p className="text-[10px] text-muted-foreground px-1">Без часу = задача на весь день</p>
               </div>
+
+              {/* Duration */}
+              <div className="p-2 border-b border-border">
+                <div className="flex items-center gap-1.5 px-1 mb-1.5">
+                  <Timer className="h-3.5 w-3.5 text-muted-foreground" />
+                  <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Тривалість</p>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {DURATION_PRESETS.map((d) => (
+                    <button
+                      key={d}
+                      className={cn(
+                        "rounded-md border px-2 py-1 text-xs transition-colors",
+                        plannedDuration === d
+                          ? "border-primary/50 bg-primary/10 text-primary font-medium"
+                          : "border-border hover:bg-accent/50 text-muted-foreground",
+                      )}
+                      onClick={() => setPlannedDuration(d)}
+                    >
+                      {formatDurationLabel(d)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Clear */}
+              {scheduledAt && (
+                <div className="p-2">
+                  <button
+                    className="w-full flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition-colors"
+                    onClick={() => { setScheduledAt(null); setPlannedDuration(30); }}
+                  >
+                    <X className="h-3 w-3" />
+                    Скасувати планування
+                  </button>
+                </div>
+              )}
             </PopoverContent>
           </Popover>
         </div>
